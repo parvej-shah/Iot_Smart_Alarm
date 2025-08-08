@@ -11,10 +11,10 @@
 
 // Configuration
 
-/* char ssid[] = "Chowdhury_Pathagar";
-char pass[] = "azim@2025"; */
-char ssid[] = "Realme GT Master Edition";
-char pass[] = "@salam104dwd@";
+char ssid[] = "Chowdhury_Pathagar";
+char pass[] = "azim@2025";
+/* char ssid[] = "Realme GT Master Edition";
+char pass[] = "@salam104dwd@"; */
 #define ledPin 18
 
 // NTP and Alarm variables
@@ -24,6 +24,8 @@ int alarmHour = -1;
 int alarmMinute = -1;
 bool alarmTriggered = false;
 int lastMinute = -1;
+bool faceDetected = false;
+unsigned long lastFaceDetectionTime = 0;
 
 // Function Declarations
 void initializeSystem();
@@ -63,6 +65,21 @@ BLYNK_WRITE(V1) {
     alarmHour = -1;
     alarmMinute = -1;
     Blynk.virtualWrite(V2, "Alarm cleared");
+  }
+}
+
+BLYNK_WRITE(V4) {
+  int value = param.asInt();
+  faceDetected = (value == 1);
+  lastFaceDetectionTime = millis();
+  
+  Serial.print("Face detection status: ");
+  Serial.println(faceDetected ? "DETECTED" : "NOT DETECTED");
+  
+  if (faceDetected) {
+    Serial.println("👤 Face detected by camera system!");
+    // Optional: Blink LED to indicate face detection
+    ledBlink(2, 100);
   }
 }
 
