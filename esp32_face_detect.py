@@ -4,7 +4,13 @@ import time
 
 # ======== CONFIG ========
 # Replace with your ESP32-CAM's IP address
-ESP32_URL = "http://192.168.0.107:81/stream"  # Usually port 81 for stream
+ESP32_URL = "http://192.168.0.105:81/stream"  # Try port 81 first
+ESP32_BACKUP_URLS = [
+    "http://192.168.0.105/stream",
+    "http://192.168.0.105/capture",
+    "http://192.168.0.105:8080/stream",
+    "http://192.168.0.105/mjpeg/1"
+]
 
 # Blynk configuration
 BLYNK_TOKEN = "mhwBpFwWvcRB3z9DexrimUS7YJay4lBU"
@@ -20,6 +26,36 @@ face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_fronta
 # Variables for face detection tracking
 last_face_detected_time = 0
 face_status_sent = False
+
+# Function to test ESP32-CAM connection
+def find_working_stream_url():
+    print("[INFO] Testing ESP32-CAM connection...")
+    
+    # Test main URL first
+    print(f"[TEST] Trying: {ESP32_URL}")
+    cap = cv2.VideoCapture(ESP32_URL)
+    if cap.isOpened():
+        ret, frame = cap.read()
+        if ret and frame is not None:
+            print(f"[SUCCESS] Working stream found: {ESP32_URL}")
+            cap.release()
+            return ESP32_URL
+        cap.release()
+    
+    # Test backup URLs
+    for url in ESP32_BACKUP_URLS:
+        print(f"[TEST] Trying: {url}")
+        cap = cv2.VideoCapture(url)
+        if cap.isOpened():
+            ret, frame = cap.read()
+            if ret and frame is not None:
+                print(f"[SUCCESS] Working stream found: {url}")
+                cap.release()
+                return url
+            cap.release()
+    
+    print("[ERROR] No working stream URL found!")
+    return None
 
 # Function to send data to Blynk
 def send_to_blynk(pin, value):
@@ -44,21 +80,32 @@ def handle_face_detection(faces_detected):
         if not face_status_sent:
             send_to_blynk(FACE_DETECTED_PIN, 1)
             face_status_sent = True
-            print("[FACE] Face detected - Alert sent to ESP32!")
+            print("🚨 [FACE] Face detected - ALARM WILL STOP! Alert sent to ESP32!")
     else:
         # No face detected
         if face_status_sent and (current_time - last_face_detected_time) > NO_FACE_TIMEOUT:
             send_to_blynk(FACE_DETECTED_PIN, 0)
             face_status_sent = False
-            print("[FACE] No face detected - Clear signal sent to ESP32!")
+            print("👁️ [FACE] No face detected - Monitoring continues...")
 
-# Connect to ESP32-CAM stream
-cap = cv2.VideoCapture(ESP32_URL)
-
-if not cap.isOpened():
-    print("[ERROR] Could not open video stream from ESP32-CAM")
+# Find working stream URL
+working_url = find_working_stream_url()
+if working_url is None:
+    print("[ERROR] Could not find any working ESP32-CAM stream!")
+    print("[INFO] Please check:")
+    print("  1. ESP32-CAM is powered on and connected to WiFi")
+    print("  2. IP address is correct (check ESP32 serial monitor)")
+    print("  3. Try accessing http://192.168.0.105 in browser")
     exit()
 
+# Connect to ESP32-CAM stream
+cap = cv2.VideoCapture(working_url)
+
+if not cap.isOpened():
+    print(f"[ERROR] Could not open video stream from {working_url}")
+    exit()
+
+print(f"[INFO] Connected to ESP32-CAM at: {working_url}")
 print("[INFO] Starting face detection... Press 'q' to quit.")
 
 while True:

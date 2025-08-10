@@ -11,11 +11,12 @@
 
 // Configuration
 
-char ssid[] = "Chowdhury_Pathagar";
-char pass[] = "azim@2025";
-/* char ssid[] = "Realme GT Master Edition";
-char pass[] = "@salam104dwd@"; */
-#define ledPin 18
+/* char ssid[] = "Chowdhury_Pathagar";
+char pass[] = "azim@2025"; */
+char ssid[] = "Realme GT Master Edition";
+char pass[] = "@salam104dwd@";
+#define ledPin 18        // Alarm LED - will blink when alarm is active
+#define statusLedPin 19  // Status LED - for other notifications and updates
 
 // NTP and Alarm variables
 WiFiUDP ntpUDP;
@@ -23,9 +24,15 @@ NTPClient timeClient(ntpUDP, "pool.ntp.org", 6 * 3600, 60000); // BD timezone (U
 int alarmHour = -1;
 int alarmMinute = -1;
 bool alarmTriggered = false;
+bool alarmHandledForCurrentTime = false;  // Prevent re-triggering for same time
 int lastMinute = -1;
 bool faceDetected = false;
 unsigned long lastFaceDetectionTime = 0;
+
+// Alarm LED blinking variables
+unsigned long lastAlarmBlinkTime = 0;
+bool alarmLedState = false;
+const unsigned long alarmBlinkInterval = 500; // Blink every 500ms when alarm is active
 
 // Function Declarations
 void initializeSystem();
@@ -37,15 +44,17 @@ void checkAlarmTrigger();
 void handleAlarmLogic();
 void handleReconnections();
 void ledBlink(int times, int delayMs);
+void statusLedBlink(int times, int delayMs);
+void handleAlarmLedBlink();
 void printCurrentTime();
 String formatTime(int hour, int minute);
 
 // ================== BLYNK CALLBACK FUNCTIONS ==================
 BLYNK_WRITE(V0) {
   int value = param.asInt();
-  Serial.print("Received command from Blynk - LED: ");
+  Serial.print("Received command from Blynk - Status LED: ");
   Serial.println(value ? "ON" : "OFF");
-  digitalWrite(ledPin, value);
+  digitalWrite(statusLedPin, value);
 }
 
 BLYNK_WRITE(V1) {
@@ -57,6 +66,7 @@ BLYNK_WRITE(V1) {
     Serial.print(formatTime(alarmHour, alarmMinute));
     Serial.println();
     alarmTriggered = false; // Reset trigger
+    alarmHandledForCurrentTime = false; // Reset handling flag for new alarm
     
     // Send confirmation to app
     Blynk.virtualWrite(V2, "Alarm set for " + formatTime(alarmHour, alarmMinute));
@@ -64,6 +74,7 @@ BLYNK_WRITE(V1) {
     Serial.println("No time selected!");
     alarmHour = -1;
     alarmMinute = -1;
+    alarmHandledForCurrentTime = false; // Reset flag when alarm is cleared
     Blynk.virtualWrite(V2, "Alarm cleared");
   }
 }
@@ -78,15 +89,31 @@ BLYNK_WRITE(V4) {
   
   if (faceDetected) {
     Serial.println("👤 Face detected by camera system!");
-    // Optional: Blink LED to indicate face detection
-    ledBlink(2, 100);
+    // Send face detection message to Blynk app
+    Blynk.virtualWrite(V2, "👤 Face Detected!");
+    
+    // Stop alarm if it's currently triggered
+    if (alarmTriggered) {
+      digitalWrite(ledPin, LOW);  // Turn off alarm LED
+      Serial.println("🔕 Alarm stopped - Face detected!");
+      Blynk.virtualWrite(V2, "🔕 Alarm stopped - Face detected!");
+      alarmTriggered = false; // Reset for next alarm
+      alarmHandledForCurrentTime = true; // Prevent re-triggering for this time
+      Serial.println("Alarm handling completed for current time - will not trigger again until next alarm");
+    }
+    
+    // Blink status LED to indicate face detection
+    statusLedBlink(3, 150);
+  } else {
+    // Face no longer detected
+    Blynk.virtualWrite(V2, "No face detected");
   }
 }
 
 BLYNK_CONNECTED() {
   Serial.println("Connected to Blynk server!");
-  ledBlink(3, 200);
-  Serial.println("LED blink sequence completed - Blynk ready!");
+  statusLedBlink(3, 200);  // Use status LED for connection indication
+  Serial.println("Status LED blink sequence completed - Blynk ready!");
   
   // Sync time and send current time to app
   timeClient.update();
@@ -109,17 +136,20 @@ void loop() {
     Blynk.run();
     handleTimeUpdates();
     handleAlarmLogic();
+    handleAlarmLedBlink();  // Handle alarm LED blinking
   } else {
     handleReconnections();
   }
   
-  delay(1000); // Check every second for better alarm accuracy
+  delay(100); // Reduced delay for better LED blinking responsiveness
 }
 
 // ================== SYSTEM INITIALIZATION FUNCTIONS ==================
 void initializeSystem() {
-  pinMode(ledPin, OUTPUT);
+  pinMode(ledPin, OUTPUT);        // Alarm LED
+  pinMode(statusLedPin, OUTPUT);  // Status LED
   digitalWrite(ledPin, LOW);
+  digitalWrite(statusLedPin, LOW);
   
   if (connectToWiFi()) {
     initializeNTP();
@@ -201,22 +231,21 @@ String formatTime(int hour, int minute) {
 void handleAlarmLogic() {
   checkAlarmTrigger();
   
-  // Auto-turn off LED after alarm minute passes
-  if (alarmTriggered) {
-    int currentHour = timeClient.getHours();
-    int currentMinute = timeClient.getMinutes();
-    
-    if (!(currentHour == alarmHour && currentMinute == alarmMinute)) {
-      digitalWrite(ledPin, LOW);
-      Serial.println("Alarm auto-stopped");
-      Blynk.virtualWrite(V2, "Alarm stopped");
-      alarmTriggered = false; // Reset for next alarm
+  // Keep alarm running until face is detected (no auto-stop based on time)
+  // The alarm LED blinking is handled by handleAlarmLedBlink()
+  if (alarmTriggered && !faceDetected) {
+    // Send periodic reminder every 30 seconds
+    static unsigned long lastReminder = 0;
+    if (millis() - lastReminder > 30000) { // 30 seconds
+      Blynk.virtualWrite(V2, "🚨 ALARM ACTIVE - Show your face to stop!");
+      Serial.println("🚨 Alarm still active - waiting for face detection");
+      lastReminder = millis();
     }
   }
 }
 
 void checkAlarmTrigger() {
-  if (alarmHour != -1 && alarmMinute != -1 && !alarmTriggered) {
+  if (alarmHour != -1 && alarmMinute != -1 && !alarmTriggered && !alarmHandledForCurrentTime) {
     int currentHour = timeClient.getHours();
     int currentMinute = timeClient.getMinutes();
     
@@ -224,17 +253,28 @@ void checkAlarmTrigger() {
       triggerAlarm();
     }
   }
+  
+  // Reset the flag when we move to a different minute
+  int currentHour = timeClient.getHours();
+  int currentMinute = timeClient.getMinutes();
+  if (!(currentHour == alarmHour && currentMinute == alarmMinute)) {
+    alarmHandledForCurrentTime = false;
+  }
 }
 
 void triggerAlarm() {
   Serial.println("🚨 ALARM TRIGGERED! 🚨");
-  digitalWrite(ledPin, HIGH);
+  // Don't set LED here - it will be handled by the blinking function
   
   // Send notification to Blynk app
-  Blynk.logEvent("alarm_triggered", "Wake up! Alarm time reached!");
-  Blynk.virtualWrite(V2, "🚨 ALARM TRIGGERED! 🚨");
+  Blynk.logEvent("alarm_triggered", "Wake up! Show your face to stop the alarm!");
+  Blynk.virtualWrite(V2, "🚨 ALARM TRIGGERED! Show your face to stop!");
   
   alarmTriggered = true;
+  faceDetected = false; // Reset face detection status
+  
+  Serial.println("Alarm will continue until face is detected!");
+  Serial.println("Alarm LED (Pin 18) will keep blinking until stopped");
 }
 
 // ================== CONNECTION MANAGEMENT FUNCTIONS ==================
@@ -263,5 +303,33 @@ void ledBlink(int times, int delayMs) {
     if (i < times - 1) {
       delay(delayMs);
     }
+  }
+}
+
+// Status LED blink function (for notifications and updates)
+void statusLedBlink(int times, int delayMs) {
+  for (int i = 0; i < times; i++) {
+    digitalWrite(statusLedPin, HIGH);
+    delay(delayMs);
+    digitalWrite(statusLedPin, LOW);
+    if (i < times - 1) {
+      delay(delayMs);
+    }
+  }
+}
+
+// Handle alarm LED continuous blinking when alarm is active
+void handleAlarmLedBlink() {
+  if (alarmTriggered) {
+    unsigned long currentTime = millis();
+    if (currentTime - lastAlarmBlinkTime >= alarmBlinkInterval) {
+      alarmLedState = !alarmLedState;
+      digitalWrite(ledPin, alarmLedState);
+      lastAlarmBlinkTime = currentTime;
+    }
+  } else {
+    // Make sure alarm LED is off when alarm is not active
+    digitalWrite(ledPin, LOW);
+    alarmLedState = false;
   }
 }
