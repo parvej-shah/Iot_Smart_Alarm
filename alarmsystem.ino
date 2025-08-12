@@ -1,7 +1,17 @@
 // ================== ESP32 SMART ALARM SYSTEM ==================
-// Features: Time-based alarm, Face detection, Room controls, Audio alerts
-// Hardware: ESP32, MAX98357A I2S Amplifier, LEDs, Motor
+// Features: Time-based alarm, Face detection, Weight sensor, Room controls, Audio alerts
+// Hardware: ESP32, MAX98357A I2S Amplifier, LEDs, Motor, Weight Sensor
 // IoT: Blynk app integration, WiFi connectivity, NTP time sync
+// ================================================================
+//
+// VIRTUAL PIN MAPPING:
+// V0 - Weight Sensor (Bed Detection): 1=In Bed, 0=Out of Bed + Status LED control
+// V1 - Time Input (Alarm Setting): Set alarm time from app
+// V2 - Display (Status Messages): Shows system status and notifications  
+// V3 - Display (Current Time): Shows current system time
+// V4 - Face Detection Input: 1=Face Detected, 0=No Face (from laptop)
+// V5 - Alarm Status Output: 1=Alarm Active, 0=Alarm Stopped (to laptop)
+// V6 - Display (Bed Status): Shows "In Bed" or "Out of Bed" status
 // ================================================================
 
 #define BLYNK_TEMPLATE_ID "TMPL6PGhOeE2W"
@@ -44,6 +54,11 @@ int lastMinute = -1;
 bool faceDetected = false;
 unsigned long lastFaceDetectionTime = 0;
 
+// Weight Sensor (Bed Detection)
+bool personInBed = false;
+unsigned long lastBedStatusTime = 0;
+bool outOfBedDuringAlarm = false;  // Track if person got out of bed during current alarm
+
 // Room Control Status
 bool roomLightOn = false;
 bool fanRunning = false;
@@ -82,9 +97,39 @@ void turnOffRoomControls();
 // ================== BLYNK CALLBACK FUNCTIONS ==================
 BLYNK_WRITE(V0) {
   int value = param.asInt();
-  Serial.print("Received command from Blynk - Status LED: ");
-  Serial.println(value ? "ON" : "OFF");
+  personInBed = (value == 1);
+  lastBedStatusTime = millis();
+  
+  Serial.print("Weight Sensor - Person in bed: ");
+  Serial.println(personInBed ? "YES (V0=1)" : "NO (V0=0)");
+  
+  // Control status LED based on bed presence
   digitalWrite(statusLedPin, value);
+  Serial.print("Status LED: ");
+  Serial.println(value ? "ON" : "OFF");
+  
+  if (personInBed) {
+    // Person is in bed
+    Serial.println("🛏️ Person detected in bed!");
+    Blynk.virtualWrite(V2, "🛏️ Person in bed - Weight sensor active");
+    
+    // Update bed status on V6 for monitoring
+    Blynk.virtualWrite(V6, "In Bed");
+  } else {
+    // Person got out of bed
+    Serial.println("🚶 Person got out of bed!");
+    Blynk.virtualWrite(V2, "🚶 Person out of bed - Weight sensor inactive");
+    
+    // Update bed status on V6 for monitoring
+    Blynk.virtualWrite(V6, "Out of Bed");
+    
+    // If alarm is active, mark that person got out of bed during this alarm
+    if (alarmTriggered) {
+      outOfBedDuringAlarm = true;
+      Serial.println("⚠️ Out of bed during alarm - Now need face detection to stop!");
+      Blynk.virtualWrite(V2, "⚠️ Out of bed - Now go to washroom and show your face to stop alarm!");
+    }
+  }
 }
 
 BLYNK_WRITE(V1) {
@@ -131,20 +176,22 @@ BLYNK_WRITE(V4) {
     // Send face detection message to Blynk app
     Blynk.virtualWrite(V2, "👤 Face Detected!");
     
-    // Stop alarm if it's currently triggered
-    if (alarmTriggered) {
+    // Stop alarm only if person got out of bed during this alarm AND face is now detected
+    if (alarmTriggered && outOfBedDuringAlarm && !personInBed) {
+      // Person is out of bed and face detected - stop alarm
       digitalWrite(ledPin, LOW);  // Turn off alarm LED
-      turnOffRoomControls();      // Turn off room light, fan, and speaker
-      Serial.println("🔕 Alarm stopped - Face detected!");
+      turnOffRoomControls();      // Turn off room controls
+      Serial.println("🔕 Alarm stopped - Out of bed AND face detected!");
       Serial.println("💡 Room light OFF, 🌀 Fan OFF, 🔇 Speaker OFF");
       
       // Send stop signal to laptop
       Blynk.virtualWrite(V5, 0);  // Signal laptop to stop alarm sound
       
-      Blynk.virtualWrite(V2, "🔕 Alarm stopped - Face detected! All controls OFF");
+      Blynk.virtualWrite(V2, "🔕 Alarm stopped - Out of bed + Face detected! All controls OFF");
       alarmTriggered = false; // Reset for next alarm
       alarmHandledForCurrentTime = true; // Prevent re-triggering for this time
-      Serial.println("Alarm handling completed for current time - will not trigger again until next alarm");
+      outOfBedDuringAlarm = false; // Reset flag for next alarm
+      Serial.println("Alarm handling completed - both conditions met");
     }
     
     // Blink status LED to indicate face detection
@@ -164,6 +211,9 @@ BLYNK_CONNECTED() {
   timeClient.update();
   String currentTime = formatTime(timeClient.getHours(), timeClient.getMinutes());
   Blynk.virtualWrite(V3, currentTime);
+  
+  // Initialize bed status display
+  Blynk.virtualWrite(V6, personInBed ? "In Bed" : "Out of Bed");
 }
 
 // ================== SETUP FUNCTION ==================
@@ -286,14 +336,21 @@ String formatTime(int hour, int minute) {
 void handleAlarmLogic() {
   checkAlarmTrigger();
   
-  // Keep alarm running until face is detected (no auto-stop based on time)
-  // The alarm LED blinking is handled by handleAlarmLedBlink()
-  if (alarmTriggered && !faceDetected) {
+  // Keep alarm running until person gets out of bed AND shows face
+  if (alarmTriggered) {
     // Send periodic reminder every 30 seconds
     static unsigned long lastReminder = 0;
     if (millis() - lastReminder > 30000) { // 30 seconds
-      Blynk.virtualWrite(V2, "🚨 ALARM ACTIVE - Show your face to stop!");
-      Serial.println("🚨 Alarm still active - waiting for face detection");
+      if (personInBed) {
+        Blynk.virtualWrite(V2, "🚨 ALARM ACTIVE - Get out of bed first!");
+        Serial.println("🚨 Alarm still active - person needs to get out of bed");
+      } else if (!outOfBedDuringAlarm) {
+        Blynk.virtualWrite(V2, "🚨 Out of bed - Now go to washroom and show your face!");
+        Serial.println("🚨 Person out of bed but haven't marked as out during alarm");
+      } else if (!faceDetected) {
+        Blynk.virtualWrite(V2, "🚨 Out of bed - Now go to washroom and show your face!");
+        Serial.println("🚨 Person out of bed but need face detection to complete wake-up");
+      }
       lastReminder = millis();
     }
   }
@@ -337,14 +394,22 @@ void triggerAlarm() {
   // Send alarm status to V5 for laptop monitoring
   Blynk.virtualWrite(V5, 1);  // Signal laptop that alarm is active
   
-  // Send notification to Blynk app
-  Blynk.logEvent("alarm_triggered", "Wake up! Show your face to stop the alarm!");
-  Blynk.virtualWrite(V2, "🚨 ALARM TRIGGERED! Room controls & sound ON! Show your face to stop!");
+  // Send notification to Blynk app based on bed status
+  if (personInBed) {
+    Blynk.logEvent("alarm_triggered", "Wake up! Get out of bed and go to washroom!");
+    Blynk.virtualWrite(V2, "🚨 ALARM TRIGGERED! Get out of bed → Go to washroom → Show face!");
+    Serial.println("Person is in bed - need to get out of bed first");
+  } else {
+    Blynk.logEvent("alarm_triggered", "Wake up! Go to washroom and show your face!");
+    Blynk.virtualWrite(V2, "🚨 ALARM TRIGGERED! Go to washroom and show your face!");
+    Serial.println("Person is out of bed - need face detection to confirm awake");
+    outOfBedDuringAlarm = true; // Already out of bed when alarm triggered
+  }
   
   alarmTriggered = true;
   faceDetected = false; // Reset face detection status
   
-  Serial.println("Alarm will continue until face is detected!");
+  Serial.println("Alarm will continue until proper wake-up conditions are met!");
   Serial.println("Alarm LED (Pin 18) will keep blinking until stopped");
 }
 
