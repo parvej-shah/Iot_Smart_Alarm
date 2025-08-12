@@ -1,3 +1,9 @@
+// ================== ESP32 SMART ALARM SYSTEM ==================
+// Features: Time-based alarm, Face detection, Room controls, Audio alerts
+// Hardware: ESP32, MAX98357A I2S Amplifier, LEDs, Motor
+// IoT: Blynk app integration, WiFi connectivity, NTP time sync
+// ================================================================
+
 #define BLYNK_TEMPLATE_ID "TMPL6PGhOeE2W"
 #define BLYNK_TEMPLATE_NAME "Smart Alarm"
 #define BLYNK_AUTH_TOKEN "mhwBpFwWvcRB3z9DexrimUS7YJay4lBU"
@@ -9,45 +15,69 @@
 #include <WiFiUdp.h>
 #include <NTPClient.h>
 
-// Configuration
-
-/* char ssid[] = "Chowdhury_Pathagar";
-char pass[] = "azim@2025"; */
+// ================== NETWORK CONFIGURATION ==================
+char ssid[] = "Chowdhury_Pathagar";  // WiFi network name
+char pass[] = "azim@2025";           // WiFi password
+/* Alternative WiFi (uncomment to use):
 char ssid[] = "Realme GT Master Edition";
-char pass[] = "@salam104dwd@";
-#define ledPin 18        // Alarm LED - will blink when alarm is active
-#define statusLedPin 19  // Status LED - for other notifications and updates
+char pass[] = "@salam104dwd@"; */
 
-// NTP and Alarm variables
+// ================== HARDWARE PIN CONFIGURATION ==================
+#define ledPin 18        // Alarm LED - blinks when alarm is active
+#define statusLedPin 19  // Status LED - for notifications and updates
+#define builtInLedPin 2  // Built-in LED (room light simulation)
+#define fanMotorPin 4    // Motor pin (fan simulation)
+
+// ================== SYSTEM VARIABLES ==================
+// NTP and Time Management
 WiFiUDP ntpUDP;
 NTPClient timeClient(ntpUDP, "pool.ntp.org", 6 * 3600, 60000); // BD timezone (UTC+6)
-int alarmHour = -1;
-int alarmMinute = -1;
+
+// Alarm Configuration
+int alarmHour = -1;           // Set via Blynk app
+int alarmMinute = -1;         // Set via Blynk app
 bool alarmTriggered = false;
 bool alarmHandledForCurrentTime = false;  // Prevent re-triggering for same time
 int lastMinute = -1;
+
+// Face Detection
 bool faceDetected = false;
 unsigned long lastFaceDetectionTime = 0;
 
-// Alarm LED blinking variables
+// Room Control Status
+bool roomLightOn = false;
+bool fanRunning = false;
+
+// LED Timing Control
 unsigned long lastAlarmBlinkTime = 0;
 bool alarmLedState = false;
 const unsigned long alarmBlinkInterval = 500; // Blink every 500ms when alarm is active
 
-// Function Declarations
+// ================== FUNCTION DECLARATIONS ==================
+// System Initialization
 void initializeSystem();
 bool connectToWiFi();
 void initializeNTP();
 bool connectToBlynk();
+
+// Time and Alarm Management
 void handleTimeUpdates();
 void checkAlarmTrigger();
 void handleAlarmLogic();
+void printCurrentTime();
+String formatTime(int hour, int minute);
+
+// Connection Management
 void handleReconnections();
+
+// LED Control
 void ledBlink(int times, int delayMs);
 void statusLedBlink(int times, int delayMs);
 void handleAlarmLedBlink();
-void printCurrentTime();
-String formatTime(int hour, int minute);
+
+// Room Controls
+void turnOnRoomControls();
+void turnOffRoomControls();
 
 // ================== BLYNK CALLBACK FUNCTIONS ==================
 BLYNK_WRITE(V0) {
@@ -68,6 +98,10 @@ BLYNK_WRITE(V1) {
     alarmTriggered = false; // Reset trigger
     alarmHandledForCurrentTime = false; // Reset handling flag for new alarm
     
+    // Reset V5 pin when setting new alarm
+    Blynk.virtualWrite(V5, 0);
+    Serial.println("🔄 [RESET] V5 pin reset to 0 for new alarm");
+    
     // Send confirmation to app
     Blynk.virtualWrite(V2, "Alarm set for " + formatTime(alarmHour, alarmMinute));
   } else {
@@ -75,6 +109,11 @@ BLYNK_WRITE(V1) {
     alarmHour = -1;
     alarmMinute = -1;
     alarmHandledForCurrentTime = false; // Reset flag when alarm is cleared
+    
+    // Clear V5 pin when alarm is cleared
+    Blynk.virtualWrite(V5, 0);
+    Serial.println("🔄 [CLEAR] V5 pin cleared");
+    
     Blynk.virtualWrite(V2, "Alarm cleared");
   }
 }
@@ -95,8 +134,14 @@ BLYNK_WRITE(V4) {
     // Stop alarm if it's currently triggered
     if (alarmTriggered) {
       digitalWrite(ledPin, LOW);  // Turn off alarm LED
+      turnOffRoomControls();      // Turn off room light, fan, and speaker
       Serial.println("🔕 Alarm stopped - Face detected!");
-      Blynk.virtualWrite(V2, "🔕 Alarm stopped - Face detected!");
+      Serial.println("💡 Room light OFF, 🌀 Fan OFF, 🔇 Speaker OFF");
+      
+      // Send stop signal to laptop
+      Blynk.virtualWrite(V5, 0);  // Signal laptop to stop alarm sound
+      
+      Blynk.virtualWrite(V2, "🔕 Alarm stopped - Face detected! All controls OFF");
       alarmTriggered = false; // Reset for next alarm
       alarmHandledForCurrentTime = true; // Prevent re-triggering for this time
       Serial.println("Alarm handling completed for current time - will not trigger again until next alarm");
@@ -131,25 +176,35 @@ void setup() {
 }
 
 // ================== MAIN LOOP ==================
+// This loop runs continuously and handles all system operations
 void loop() {
   if (WiFi.status() == WL_CONNECTED && Blynk.connected()) {
-    Blynk.run();
-    handleTimeUpdates();
-    handleAlarmLogic();
-    handleAlarmLedBlink();  // Handle alarm LED blinking
+    Blynk.run();              // Process Blynk communication
+    handleTimeUpdates();      // Update system time
+    handleAlarmLogic();       // Check and handle alarm triggers
+    handleAlarmLedBlink();    // Manage alarm LED blinking
   } else {
-    handleReconnections();
+    handleReconnections();    // Reconnect WiFi/Blynk if needed
   }
   
-  delay(100); // Reduced delay for better LED blinking responsiveness
+  delay(100); // Small delay for system responsiveness
 }
 
 // ================== SYSTEM INITIALIZATION FUNCTIONS ==================
 void initializeSystem() {
   pinMode(ledPin, OUTPUT);        // Alarm LED
   pinMode(statusLedPin, OUTPUT);  // Status LED
+  pinMode(builtInLedPin, OUTPUT); // Built-in LED (room light)
+  pinMode(fanMotorPin, OUTPUT);   // Motor (fan)
+  
+  // Initialize all outputs to OFF
   digitalWrite(ledPin, LOW);
   digitalWrite(statusLedPin, LOW);
+  digitalWrite(builtInLedPin, LOW);
+  digitalWrite(fanMotorPin, LOW);
+  
+  roomLightOn = false;
+  fanRunning = false;
   
   if (connectToWiFi()) {
     initializeNTP();
@@ -249,7 +304,16 @@ void checkAlarmTrigger() {
     int currentHour = timeClient.getHours();
     int currentMinute = timeClient.getMinutes();
     
+    // Debug: Print current time vs alarm time every 30 seconds
+    static unsigned long lastDebugPrint = 0;
+    if (millis() - lastDebugPrint > 30000) { // Every 30 seconds
+      Serial.printf("⏰ [DEBUG] Current: %02d:%02d, Alarm set: %02d:%02d\n", 
+                    currentHour, currentMinute, alarmHour, alarmMinute);
+      lastDebugPrint = millis();
+    }
+    
     if (currentHour == alarmHour && currentMinute == alarmMinute) {
+      Serial.println("🎯 [ALARM] Time match detected - triggering alarm!");
       triggerAlarm();
     }
   }
@@ -266,9 +330,16 @@ void triggerAlarm() {
   Serial.println("🚨 ALARM TRIGGERED! 🚨");
   // Don't set LED here - it will be handled by the blinking function
   
+  // Turn on room controls (light, fan, and speaker)
+  turnOnRoomControls();
+  Serial.println("💡 Room light ON, 🌀 Fan ON, 🔊 Speaker ON");
+  
+  // Send alarm status to V5 for laptop monitoring
+  Blynk.virtualWrite(V5, 1);  // Signal laptop that alarm is active
+  
   // Send notification to Blynk app
   Blynk.logEvent("alarm_triggered", "Wake up! Show your face to stop the alarm!");
-  Blynk.virtualWrite(V2, "🚨 ALARM TRIGGERED! Show your face to stop!");
+  Blynk.virtualWrite(V2, "🚨 ALARM TRIGGERED! Room controls & sound ON! Show your face to stop!");
   
   alarmTriggered = true;
   faceDetected = false; // Reset face detection status
@@ -333,3 +404,26 @@ void handleAlarmLedBlink() {
     alarmLedState = false;
   }
 }
+
+// ================== ROOM CONTROL FUNCTIONS ==================
+// Turn on room light and fan when alarm triggers (audio handled by laptop)
+void turnOnRoomControls() {
+  digitalWrite(builtInLedPin, HIGH);  // Turn on built-in LED (room light)
+  digitalWrite(fanMotorPin, HIGH);    // Turn on motor (fan)
+  roomLightOn = true;
+  fanRunning = true;
+  Serial.println("✅ Room controls activated - Light and Fan ON (Audio via laptop)");
+}
+
+// Turn off room light and fan when face is detected (audio handled by laptop)
+void turnOffRoomControls() {
+  digitalWrite(builtInLedPin, LOW);   // Turn off built-in LED (room light)
+  digitalWrite(fanMotorPin, LOW);     // Turn off motor (fan)
+  roomLightOn = false;
+  fanRunning = false;
+  Serial.println("❌ Room controls deactivated - Light and Fan OFF (Audio via laptop)");
+}
+
+// ================== END OF PROGRAM ==================
+// All audio functionality handled by laptop Python script
+// ESP32 handles: LED control, room controls, Blynk communication
